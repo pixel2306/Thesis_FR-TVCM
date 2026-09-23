@@ -12,3 +12,6 @@ $$Y_i(t)$$ = load curve of day i
 $$\beta_i(t)$$ = coefficient function of day i
 
 $$\varepsilon_i(t)$$ = residual process of day i
+
+## Data
+The data used in this research are confidential and not disclosed in this repository.
