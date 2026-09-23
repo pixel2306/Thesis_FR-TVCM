@@ -1,0 +1,600 @@
+---
+title: "Explore Input Gaussian"
+author: "PASKALIS SINURAT"
+date: "2026-06-19"
+output: html_document
+---
+
+## LIBRARY
+
+```{r library, echo=TRUE}
+library(tvReg)
+library(readxl)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(fda)
+library(tidyverse)
+library(latex2exp)
+library(writexl)
+```
+
+## DATA
+
+```{r Data, echo=TRUE}
+data <- read_xlsx("D:/S2 LETS GO/4. SEMESTER 4/SYNTAX/DATA_LN3.xlsx")
+data <- as.data.frame(data)
+head(data)
+```
+
+## FR-TVCM
+
+```{r FR-TVCM, echo=TRUE, error=TRUE}
+Y <- data$Y[721:87648]
+Ylag1 <- data$Y[673:87600]
+Ylag2 <- data$Y[625:87552]
+Ylag3 <- data$Y[577:87504]
+Ylag4 <- data$Y[529:87456]
+Ylag5 <- data$Y[481:87408]
+Ylag6 <- data$Y[433:87360]
+Ylag7 <- data$Y[385:87312]
+Ylag8 <- data$Y[337:87264]
+Ylag9 <- data$Y[289:87216]
+Ylag10 <- data$Y[241:87168]
+Ylag11 <- data$Y[193:87120]
+Ylag12 <- data$Y[145:87072]
+Ylag13 <- data$Y[97:87024]
+Ylag14 <- data$Y[49:86976]
+Ylag15 <- data$Y[1:86928]
+
+#Dummy LN
+LN <- data$NEWLN[721:87648]
+
+#Dummy LN 3 type
+NS <- data$LN_NS[721:87648]
+M <- data$LN_M[721:87648]
+NM <- data$LN_NM[721:87648]
+
+n_day <- 1811
+intervals_per_day <- 48
+n <- n_day * intervals_per_day
+
+# Slot waktu dalam sehari (1 sampai 48), diulang untuk 30 hari
+slot <- rep(1:intervals_per_day, n_day)
+slot_scaled <- (slot - 1) / (intervals_per_day - 1)
+
+# --- 3 spesifikasi dummy ---
+formulas <- list(
+  TanpaDummy = Y ~ 1 + Ylag1 + Ylag7 + Ylag8 + Ylag14 + Ylag15,
+  DummyLN    = Y ~ 1 + Ylag1 + Ylag7 + Ylag8 + Ylag14 + Ylag15 + LN,
+  Dummy3Type = Y ~ 1 + Ylag1 + Ylag7 + Ylag8 + Ylag14 + Ylag15 + NS + M + NM
+)
+
+bws <- c(0.043, 0.086, 0.128)
+ker <- "Gaussian"
+
+# --- Grid 9 model. bw bervariasi paling cepat di dalam tiap spesifikasi dummy ---
+configs <- expand.grid(bw = bws, spec = names(formulas),
+                       KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
+
+# --- Grid 48 titik intrahari ---
+n_points    <- 48
+slot_id     <- 1:n_points
+time_scaled <- (slot_id - 1) / (n_points - 1)
+
+# --- Wadah hasil ---
+results <- vector("list", nrow(configs))
+models  <- vector("list", nrow(configs))
+
+# --- Loop 9 model: fit -> simpan 48 titik -> summary ---
+for (i in seq_len(nrow(configs))) {
+  spec_i <- configs$spec[i]
+  bw_i   <- configs$bw[i]
+  cat("\n>>> Menjalankan Model", i, "dari", nrow(configs),
+      "|", spec_i, "| bw =", bw_i, "...\n"); flush.console()
+
+  model_i <- tvLM(formulas[[spec_i]],
+                  z = slot_scaled, bw = bw_i, tkernel = ker, est = "ll")
+
+  coef_mat <- model_i$coefficients[1:n_points, , drop = FALSE]   # 48 slot
+  results[[i]] <- data.frame(
+    Slot        = slot_id,
+    Time_scaled = time_scaled,
+    coef_mat,
+    check.names = FALSE
+  )
+  models[[i]] <- model_i
+  names(results)[i] <- paste0("M", i, "_", spec_i, "_bw", bw_i)
+
+  cat("\n===== Summary Model", i, "|", spec_i, "| bw =", bw_i, "=====\n")
+  print(summary(model_i)); flush.console()
+}
+
+# --- Ekspor 9 sheet ---
+write_xlsx(results, path = "Estimasi_FRTVCM_Dummy9Model_Gaussian.xlsx")
+```
+
+## Residual
+
+```{r Residual, echo=TRUE, error=TRUE}
+# slot + tanggal
+residual_df <- data.frame(
+  Slot = slot,
+  Tanggal = data$Tanggal[721:87648])
+
+# tambah residual 9 model
+for(i in seq_along(models)){
+  residual_df[[paste0("Residual_M", i)]] <-
+    models[[i]]$residuals}
+
+# export 1 sheet
+write_xlsx(
+  list(Residual = residual_df),
+  path = "Residual_9Model_Gaussian.xlsx")
+```
+
+## Diagnostic
+
+```{r Diagnostic, echo=TRUE, error=TRUE}
+resid_all <- residual_df
+head(resid_all)
+
+n_day <- 1811
+intervals_per_day <- 48
+n <- n_day * intervals_per_day
+
+# Slot waktu dalam sehari (1 sampai 48), diulang untuk 30 hari
+slot <- rep(1:intervals_per_day, n_day)
+slot_scaled <- (slot - 1) / (intervals_per_day - 1)
+
+
+# ===== resid test =====
+residTest <- function(scores, eigen.resid, eigen.covariate, bin, M = 1000) {
+  set.seed(123)
+  K <- scores %>% distinct(k) %>% pull()
+  n <- scores %>% filter(k == 1) %>% count() %>% pull()
+  J <- names(scores %>% dplyr::select(-k, -resid))
+
+  Tk <- c()
+  for (i in K) {
+    Tj <- c()
+    for (j in J) {
+      tj <- scores %>%
+        dplyr::select(k, resid) %>%
+        mutate(covariate = as.matrix(scores[j])) %>%
+        filter(k == i) %>%
+        mutate_if(is.matrix, as.numeric) %>%
+        arrange(covariate) %>%
+        mutate(bin = bin) %>%
+        group_by(bin) %>%
+        summarize(mean = mean(resid)) %>%
+        summarize(var = var(mean))
+
+      Tj <- c(Tj, tj$var)
+    }
+    Tk <- c(Tk, weighted.mean(Tj, eigen.covariate))
+  }
+
+  T0 <- weighted.mean(Tk, eigen.resid)
+
+  T0m <- c()
+  for (j in 1:M) {
+    Tm <- c()
+    for (i in K) {
+      tm <- scores %>%
+        filter(k == i) %>%
+        dplyr::select(resid) %>%
+        sample_n(n) %>%
+        mutate(bin = bin) %>%
+        group_by(bin) %>%
+        summarize(mean = mean(resid)) %>%
+        summarize(var = var(mean))
+
+      Tm <- c(Tm, tm$var)
+    }
+    T0m <- c(T0m, weighted.mean(Tm, eigen.resid))
+  }
+
+  pvalue <- mean(T0m >= T0)
+
+  list(stat = T0, dist = T0m, pvalue = pvalue)
+}
+
+# ===== SETUP KONSTANTA =====
+
+t   <- slot_scaled
+day <- data$Tanggal[721:87648]
+
+BSpline <- function(nbasis) create.bspline.basis(c(1, 48), nbasis)
+
+bins_list <- list(
+  bin1 = c(rep(1:15, each = 120), rep(16, each = 11)),
+  bin2 = c(rep(1:30, each = 60),  rep(31, each = 11)),
+  bin3 = c(rep(1:60, each = 30),  rep(61, each = 11)))
+
+# ===== DEFINISI KOVARIAT PER SPESIFIKASI =====
+
+covariates_by_spec <- list(
+
+  TanpaDummy = list(
+    Ylag1  = data$Y[673:87600],
+    Ylag7  = data$Y[385:87312],
+    Ylag8  = data$Y[337:87264],
+    Ylag14 = data$Y[49:86976],
+    Ylag15 = data$Y[1:86928]),
+
+  DummyLN = list(
+    Ylag1  = data$Y[673:87600],
+    Ylag7  = data$Y[385:87312],
+    Ylag8  = data$Y[337:87264],
+    Ylag14 = data$Y[49:86976],
+    Ylag15 = data$Y[1:86928],
+    LN     = data$NEWLN[721:87648]),
+
+  Dummy3Type = list(
+    Ylag1  = data$Y[673:87600],
+    Ylag7  = data$Y[385:87312],
+    Ylag8  = data$Y[337:87264],
+    Ylag14 = data$Y[49:86976],
+    Ylag15 = data$Y[1:86928],
+    NS     = data$LN_NS[721:87648],
+    M      = data$LN_M[721:87648],
+    NM     = data$LN_NM[721:87648]))
+
+# ===== LABEL 9 MODEL =====
+
+bws   <- c(0.043, 0.086, 0.128)
+specs <- c("TanpaDummy", "DummyLN", "Dummy3Type")
+
+configs <- expand.grid(bw   = bws,
+                       spec = specs,
+                       KEEP.OUT.ATTRS = FALSE,
+                       stringsAsFactors = FALSE)
+
+# ===== PRA-HITUNG PCA KOVARIAT PER SPESIFIKASI =====
+
+pca_covariates <- list()
+
+for (spec in specs) {
+  cat("\n>>> PCA kovariat untuk spesifikasi:", spec, "\n")
+  pca_covariates[[spec]] <- list()
+  cov_list <- covariates_by_spec[[spec]]
+
+  for (cov_name in names(cov_list)) {
+    cat("  Memproses kovariat:", cov_name, "...\n"); flush.console()
+
+    cov_df  <- data.frame(t = t, day = day,
+                          covariate = cov_list[[cov_name]])
+    cov_mat <- spread(cov_df, key = day, value = covariate) %>%
+                 dplyr::select(-t)
+    cov_fd  <- smooth.basis(y = as.matrix(cov_mat), fdParobj = BSpline(7))
+    cov_pca <- pca.fd(cov_fd$fd, nharm = 6)
+
+    pca_covariates[[spec]][[cov_name]] <- list(
+      scores = cov_pca$scores[, 1:2],
+      eigen  = cov_pca$values[1:2])
+      }
+}
+
+# ===== LOOPING DIAGNOSTIK UNTUK 9 MODEL =====
+
+all_results <- list()
+
+for (m in 1:9) {
+  spec_m  <- configs$spec[m]
+  bw_m    <- configs$bw[m]
+  model_name <- paste0("M", m, "_", spec_m, "_bw", bw_m)
+
+  cat("MODEL", m, ":", model_name, "\n")
+
+  # --- 5a. Ambil residual dari Excel ---
+  resid_vec <- resid_all[[paste0("Residual_M", m)]]
+
+  # --- 5b. Functional data residual ---
+  resid_df  <- data.frame(t = t, day = day, resid = resid_vec)
+  resid_mat <- spread(resid_df, key = day, value = resid) %>%
+                 dplyr::select(-t)
+  resid_fd  <- smooth.basis(y = as.matrix(resid_mat), fdParobj = BSpline(7))
+
+  # --- 5c. PCA residual ---
+  resid_pca    <- pca.fd(resid_fd$fd, nharm = 6)
+  resid_scores <- resid_pca$scores[, 1:2]
+  eigen_resid  <- resid_pca$values[1:2]
+
+  resid_scores_df <- data.frame(
+    k     = rep(1:2, each = nrow(resid_scores)),
+    resid = as.vector(resid_scores)
+  )
+
+  # --- 5d. Loop bin x kovariat ---
+  results_model  <- list()
+  cov_names_spec <- names(pca_covariates[[spec_m]])
+
+  for (b in names(bins_list)) {
+    cat("\n  --- BIN:", b, "---\n")
+    results_model[[b]] <- list()
+
+    for (cov_name in cov_names_spec) {
+      cov_sc <- pca_covariates[[spec_m]][[cov_name]]$scores
+      colnames(cov_sc) <- c("PC1", "PC2")
+
+      scores_temp <- cbind(resid_scores_df, cov_sc)
+
+      results_model[[b]][[cov_name]] <- residTest(
+        scores          = scores_temp,
+        eigen.resid     = eigen_resid,
+        eigen.covariate = pca_covariates[[spec_m]][[cov_name]]$eigen,
+        bin             = bins_list[[b]]
+      )
+
+      cat(sprintf("  %-8s | Stat: %.6f | p-value: %.4f\n",
+                  cov_name,
+                  results_model[[b]][[cov_name]]$stat,
+                  results_model[[b]][[cov_name]]$pvalue))
+    }
+  }
+
+  all_results[[model_name]] <- results_model
+}
+
+# ===== TABEL RINGKASAN =====
+
+summary_rows <- list()
+
+for (m in 1:9) {
+  spec_m     <- configs$spec[m]
+  bw_m       <- configs$bw[m]
+  model_name <- paste0("M", m, "_", spec_m, "_bw", bw_m)
+
+  for (b in names(bins_list)) {
+    for (cov_name in names(all_results[[model_name]][[b]])) {
+      r <- all_results[[model_name]][[b]][[cov_name]]
+      summary_rows[[length(summary_rows) + 1]] <- data.frame(
+        Model     = paste0("M", m),
+        Spec      = spec_m,
+        Bandwidth = bw_m,
+        Bin       = b,
+        Covariate = cov_name,
+        Stat      = round(r$stat,    6),
+        Pvalue    = round(r$pvalue,  4),
+        Signif    = ifelse(r$pvalue < 0.05, "*", ""),
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+}
+
+summary_df <- do.call(rbind, summary_rows)
+
+print(summary_df, row.names = FALSE)
+
+# Ekspor
+write_xlsx(summary_df, "Diagnostic_ChiouMuller_9Model_Gaussian.xlsx")
+```
+
+## Out of Sampel Accuracy
+
+```{r Model Accuracy, echo=TRUE, error=TRUE}
+# =============================================================
+# 1. AMBIL KOEFISIEN DARI OBJEK MODEL (bukan dari Excel)
+# =============================================================
+
+# Koefisien dari hasil estimasi sudah tersimpan di objects 'models'
+# Kita akan ekstrak koefisien dari masing-masing model
+
+# =============================================================
+# 2. KONFIGURASI 9 MODEL (sama seperti sebelumnya)
+# =============================================================
+
+bws   <- c(0.043, 0.086, 0.128)
+specs <- c("TanpaDummy", "DummyLN", "Dummy3Type")
+
+configs <- expand.grid(bw   = bws,
+                       spec = specs,
+                       KEEP.OUT.ATTRS = FALSE,
+                       stringsAsFactors = FALSE)
+configs$model_id <- paste0("M", 1:9)
+
+# =============================================================
+# 3. LAG SEED & DATA AKTUAL OS (sama seperti sebelumnya)
+# =============================================================
+
+Ylag1_OS  <- data$Y[87601:87648]
+Ylag2_OS  <- data$Y[87553:87600]
+Ylag3_OS  <- data$Y[87505:87552]
+Ylag4_OS  <- data$Y[87457:87504]
+Ylag5_OS  <- data$Y[87409:87456]
+Ylag6_OS  <- data$Y[87361:87408]
+Ylag7_OS  <- data$Y[87313:87360]
+Ylag8_OS  <- data$Y[87265:87312]
+Ylag9_OS  <- data$Y[87217:87264]
+Ylag10_OS <- data$Y[87169:87216]
+Ylag11_OS <- data$Y[87121:87168]
+Ylag12_OS <- data$Y[87073:87120]
+Ylag13_OS <- data$Y[87025:87072]
+Ylag14_OS <- data$Y[86977:87024]
+Ylag15_OS <- data$Y[86929:86976]
+
+Yact <- data$Y[87649:87984]
+
+LN_OS <- data$NEWLN[87649:87984]
+NS_OS <- data$LN_NS[87649:87984]
+NM_OS <- data$LN_NM[87649:87984]  # Tambahkan untuk Dummy3Type
+
+# =============================================================
+# 4. EKSTRAK KOEFISIEN DARI OBJEK MODEL
+# =============================================================
+
+# Fungsi untuk mengekstrak koefisien pada 48 titik waktu
+extract_coefficients <- function(model_object, n_points = 48) {
+  # Ambil matriks koefisien dari model
+  coef_mat <- model_object$coefficients[1:n_points, , drop = FALSE]
+  
+  # Konversi ke data frame
+  coef_df <- data.frame(
+    Intercept = coef_mat[, "(Intercept)"],
+    Ylag1     = coef_mat[, "Ylag1"],
+    Ylag7     = coef_mat[, "Ylag7"],
+    Ylag8     = coef_mat[, "Ylag8"],
+    Ylag14    = coef_mat[, "Ylag14"],
+    Ylag15    = coef_mat[, "Ylag15"]
+  )
+  
+  # Tambahkan variabel dummy jika ada
+  if ("LN" %in% colnames(coef_mat)) {
+    coef_df$LN <- coef_mat[, "LN"]
+  }
+  if ("NS" %in% colnames(coef_mat)) {
+    coef_df$NS <- coef_mat[, "NS"]
+  }
+  if ("M" %in% colnames(coef_mat)) {
+    coef_df$M <- coef_mat[, "M"]
+  }
+  if ("NM" %in% colnames(coef_mat)) {
+    coef_df$NM <- coef_mat[, "NM"]
+  }
+  
+  return(coef_df)
+}
+
+# Ekstrak koefisien dari semua model
+coef_list <- list()
+for (i in 1:9) {
+  coef_list[[i]] <- extract_coefficients(models[[i]])
+}
+names(coef_list) <- paste0("M", 1:9, "_", configs$spec, "_bw", configs$bw)
+
+# =============================================================
+# 5. LOOPING 9 MODEL (sama seperti sebelumnya)
+# =============================================================
+
+all_overall <- list()
+all_daily   <- list()
+all_yhat    <- list()
+
+for (m in 1:9) {
+  
+  spec_m <- configs$spec[m]
+  bw_m   <- configs$bw[m]
+  mid    <- configs$model_id[m]
+  
+  cat("\n>>> Model", m, "|", spec_m, "| bw =", bw_m, "\n")
+  
+  # Ambil koefisien dari list yang sudah diekstrak
+  cf <- coef_list[[m]]
+  
+  # --- Ambil koefisien ---
+  BetaI  <- cf$Intercept
+  Beta1  <- cf$Ylag1
+  Beta7  <- cf$Ylag7
+  Beta8  <- cf$Ylag8
+  Beta14 <- cf$Ylag14
+  Beta15 <- cf$Ylag15
+  
+  # --- Dummy term D1 & D2 ---
+  if (spec_m == "TanpaDummy") {
+    DummyD1 <- 0
+    DummyD2 <- 0
+  } else if (spec_m == "DummyLN") {
+    BetaLN  <- cf$LN
+    DummyD1 <- BetaLN * LN_OS[1:48]
+    DummyD2 <- BetaLN * LN_OS[49:96]
+  } else if (spec_m == "Dummy3Type") {
+    # Untuk Dummy3Type, gunakan NS, M, dan NM
+    BetaNS <- cf$NS
+    BetaM  <- cf$M
+    BetaNM <- cf$NM
+    
+    # D1 (hari 1) - menggunakan lag seed
+    DummyD1 <- BetaNS * NS_OS[1:48] + BetaM * data$LN_M[87649:87696] + BetaNM * data$LN_NM[87649:87696]
+    
+    # D2 (hari 2) - menggunakan lag seed (perhatikan indeks)
+    DummyD2 <- BetaNS * NS_OS[49:96] + BetaM * data$LN_M[87697:87744] + BetaNM * data$LN_NM[87697:87744]
+  }
+  
+  # --- Forecast 7 hari ---
+  # Hari 1: menggunakan seed lags
+  YhatD1 <- BetaI + Beta1*Ylag1_OS + Beta7*Ylag7_OS + Beta8*Ylag8_OS + Beta14*Ylag14_OS + Beta15*Ylag15_OS + DummyD1
+  
+  # Hari 2: menggunakan YhatD1 sebagai Ylag1
+  YhatD2 <- BetaI + Beta1*YhatD1 + Beta7*Ylag6_OS + Beta8*Ylag7_OS + Beta14*Ylag13_OS + Beta15*Ylag14_OS + DummyD2
+  
+  # Hari 3-7: menggunakan forecast sebelumnya
+  YhatD3 <- BetaI + Beta1*YhatD2 + Beta7*Ylag5_OS + Beta8*Ylag6_OS + Beta14*Ylag12_OS + Beta15*Ylag13_OS
+  YhatD4 <- BetaI + Beta1*YhatD3 + Beta7*Ylag4_OS + Beta8*Ylag5_OS + Beta14*Ylag11_OS + Beta15*Ylag12_OS
+  YhatD5 <- BetaI + Beta1*YhatD4 + Beta7*Ylag3_OS + Beta8*Ylag4_OS + Beta14*Ylag10_OS + Beta15*Ylag11_OS
+  YhatD6 <- BetaI + Beta1*YhatD5 + Beta7*Ylag2_OS + Beta8*Ylag3_OS + Beta14*Ylag9_OS  + Beta15*Ylag10_OS
+  YhatD7 <- BetaI + Beta1*YhatD6 + Beta7*Ylag1_OS + Beta8*Ylag2_OS + Beta14*Ylag8_OS  + Beta15*Ylag9_OS
+  
+  Yhat      <- c(YhatD1, YhatD2, YhatD3, YhatD4, YhatD5, YhatD6, YhatD7)
+  Yhat_list <- list(YhatD1, YhatD2, YhatD3, YhatD4, YhatD5, YhatD6, YhatD7)
+  
+  # --- Overall ---
+  RMSE  <- sqrt(sum((Yact - Yhat)^2) / 336)
+  MAPE  <- sum(abs((Yact - Yhat) / Yact)) / 336 * 100
+  SMAPE <- sum(abs(Yact - Yhat) / ((abs(Yact) + abs(Yhat)) / 2)) / 336 * 100
+  
+  cat(sprintf("  Overall | RMSE: %.4f | MAPE: %.4f%% | sMAPE: %.4f%%\n",
+              RMSE, MAPE, SMAPE))
+  
+  all_overall[[m]] <- data.frame(
+    Model     = mid,
+    Spec      = spec_m,
+    Bandwidth = bw_m,
+    RMSE      = RMSE,
+    MAPE      = MAPE,
+    sMAPE     = SMAPE
+  )
+  
+  # --- Daily ---
+  eval_daily <- lapply(seq_len(7), function(d) {
+    idx     <- ((d - 1) * 48 + 1):(d * 48)
+    act     <- Yact[idx]
+    hat     <- Yhat_list[[d]]
+    rmse_d  <- sqrt(mean((act - hat)^2))
+    mape_d  <- mean(abs((act - hat) / act)) * 100
+    smape_d <- mean(abs(act - hat) / ((abs(act) + abs(hat)) / 2)) * 100
+    cat(sprintf("  Day %d   | RMSE: %.4f | MAPE: %.4f%% | sMAPE: %.4f%%\n",
+                d, rmse_d, mape_d, smape_d))
+    data.frame(Model     = mid,
+               Spec      = spec_m,
+               Bandwidth = bw_m,
+               Day       = d,
+               RMSE      = rmse_d,
+               MAPE      = mape_d,
+               sMAPE     = smape_d)
+  })
+  
+  all_daily[[m]] <- do.call(rbind, eval_daily)
+  
+  # --- Simpan Yhat ---
+  all_yhat[[mid]] <- data.frame(
+    Time = 1:336,
+    Day  = rep(1:7, each = 48),
+    Yact = Yact,
+    Yhat = Yhat
+  )
+}
+
+# =============================================================
+# 6. GABUNG & EKSPOR
+# =============================================================
+
+overall_df <- do.call(rbind, all_overall)
+daily_df   <- do.call(rbind, all_daily)
+
+cat("\n\n===== OVERALL ACCURACY =====\n")
+print(overall_df, row.names = FALSE, digits = 4)
+
+cat("\n\n===== DAILY ACCURACY =====\n")
+print(daily_df, row.names = FALSE, digits = 4)
+
+# Ekspor hasil
+write.csv(overall_df, "Accuracy_Overall_9Model.csv", row.names = FALSE)
+write.csv(daily_df,   "Accuracy_Daily_9Model.csv",   row.names = FALSE)
+
+export_list           <- all_yhat
+export_list$Overall   <- overall_df
+export_list$Daily     <- daily_df
+write_xlsx(export_list, "Forecast_OutSample_9Model.xlsx")
+```
